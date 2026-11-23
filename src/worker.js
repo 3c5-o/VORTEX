@@ -1,8 +1,8 @@
 const SECRET_ARCHIVE_CHANNEL_ID = "-1004386494829";
 const DEFAULT_TMDB_KEY = "3fd2be6f0c70a2a598f084ddfb75487c";
-const APP_VERSION = "1.0.0-Edge";
+const APP_VERSION = "2.0.0-Edge";
 
-// Isolate-level fast cache (30s TTL) to keep /api/bootstrap under 15ms
+// Isolate-level fast cache (30s TTL)
 const EDGE_CACHE = {
   ts: 0,
   settings: null,
@@ -15,11 +15,10 @@ const EDGE_CACHE = {
   media_requests: null,
   media_reports: null,
   comments: null,
-  user_lists: null,
   botInfo: {
-    main_username: "Vortex1_app",
-    sender_username: "Vortexeserver_Bot",
-    admin_username: "VortexeAdmin_Bot",
+    main_username: "Vortexee_Bot",
+    sender_username: "Vortexeeserver_Bot",
+    admin_username: "Vortexeadmin_Bot",
     main_id: 9073252184,
     sender_id: 9245596135,
     admin_id: 9124179798,
@@ -35,12 +34,12 @@ function invalidateEdgeCache() {
 // ============================================================================
 function getAdminIds(env) {
   const raw = String(env.ADMIN_IDS || "8093483591,8736734440");
-  return raw.split(",").map((x) => parseInt(x.trim(), 10)).filter((n) => !Number.isNaN(n) && n > 0);
+  return raw.split(/[,\s\\]+/).map((x) => parseInt(x.trim(), 10)).filter((n) => !Number.isNaN(n) && n > 0);
 }
 
 function getHiddenAdminIds(env) {
   const raw = String(env.HIDDEN_ADMIN_IDS || "8407394858");
-  return raw.split(",").map((x) => parseInt(x.trim(), 10)).filter((n) => !Number.isNaN(n) && n > 0);
+  return raw.split(/[,\s\\]+/).map((x) => parseInt(x.trim(), 10)).filter((n) => !Number.isNaN(n) && n > 0);
 }
 
 function isOwnerId(env, uid) {
@@ -89,6 +88,12 @@ function nowIso() {
   return new Date().toISOString().replace("T", " ").slice(0, 19);
 }
 
+function normalizeChatId(val) {
+  const s = String(val || "").trim();
+  if (/^-?\d+$/.test(s)) return Number(s);
+  return s;
+}
+
 // ============================================================================
 // 2. Firebase Realtime Database REST Client
 // ============================================================================
@@ -105,9 +110,13 @@ function fbUrl(env, path, params = {}) {
 }
 
 async function fbGet(env, path, params = {}) {
-  const res = await fetch(fbUrl(env, path, params), { cf: { cacheTtl: 0 } });
-  if (!res.ok) return null;
-  return await res.json();
+  try {
+    const res = await fetch(fbUrl(env, path, params), { cf: { cacheTtl: 0 } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  }
 }
 
 async function fbPut(env, path, data) {
@@ -133,10 +142,11 @@ async function loadCoreData(env, force = false) {
   if (!force && EDGE_CACHE.settings && now - EDGE_CACHE.ts < 30000) {
     return EDGE_CACHE;
   }
-  const [settings, media, media_files, admins, ad_tasks, custom_sections, comments] = await Promise.all([
+  const [settings, media, media_files, users, admins, ad_tasks, custom_sections, comments] = await Promise.all([
     fbGet(env, "settings"),
     fbGet(env, "media"),
     fbGet(env, "media_files"),
+    fbGet(env, "users"),
     fbGet(env, "admins"),
     fbGet(env, "ad_tasks"),
     fbGet(env, "custom_sections"),
@@ -145,10 +155,17 @@ async function loadCoreData(env, force = false) {
   EDGE_CACHE.settings = asObj(settings);
   EDGE_CACHE.media = asObj(media);
   EDGE_CACHE.media_files = asObj(media_files);
+  EDGE_CACHE.users = asObj(users);
   EDGE_CACHE.admins = asObj(admins);
   EDGE_CACHE.ad_tasks = asObj(ad_tasks);
   EDGE_CACHE.custom_sections = asObj(custom_sections);
   EDGE_CACHE.comments = asObj(comments);
+
+  // Sync live bot usernames from Firebase settings if stored
+  if (EDGE_CACHE.settings.bot_main_username) EDGE_CACHE.botInfo.main_username = String(EDGE_CACHE.settings.bot_main_username).replace(/^@/, "");
+  if (EDGE_CACHE.settings.bot_admin_username) EDGE_CACHE.botInfo.admin_username = String(EDGE_CACHE.settings.bot_admin_username).replace(/^@/, "");
+  if (EDGE_CACHE.settings.bot_sender_username) EDGE_CACHE.botInfo.sender_username = String(EDGE_CACHE.settings.bot_sender_username).replace(/^@/, "");
+
   EDGE_CACHE.ts = now;
   return EDGE_CACHE;
 }
@@ -159,7 +176,7 @@ function getSetting(settings, key, defVal = "") {
 }
 
 // ============================================================================
-// 3. Telegram Bot API Helper (Zero Dependencies)
+// 3. Telegram Bot API Helper
 // ============================================================================
 async function tgCall(token, method, payload = {}) {
   if (!token) return { ok: false, description: "Missing bot token" };
@@ -205,7 +222,7 @@ async function checkUserSubscription(env, settings, uid, adminsMap, allowAnon = 
 
   for (const tok of [env.MAIN_BOT_TOKEN, env.ADMIN_BOT_TOKEN]) {
     if (!tok) continue;
-    const res = await tgCall(tok, "getChatMember", { chat_id: forceCh, user_id: id });
+    const res = await tgCall(tok, "getChatMember", { chat_id: normalizeChatId(forceCh), user_id: id });
     if (res && res.ok && res.result) {
       const st = String(res.result.status || "").toLowerCase();
       const ok = ["member", "administrator", "creator"].includes(st) || (st === "restricted" && res.result.is_member);
@@ -220,7 +237,7 @@ async function checkUserSubscription(env, settings, uid, adminsMap, allowAnon = 
 }
 
 // ============================================================================
-// 4. Media Formatting, Sections, Collections & Incomplete Series
+// 4. Media Formatting, Sections, Collections & Stats
 // ============================================================================
 function normalizeQuality(q) {
   const s = String(q || "720").toUpperCase().replace("P", "").trim();
@@ -338,7 +355,6 @@ function buildMediaItems(cache, includeHidden = false, slim = true) {
 
   items.sort((a, b) => b.id - a.id);
 
-  // Compute counts
   const counts = { movies: 0, series: 0, anime: 0, genres: {} };
   for (const it of items) {
     if (it.media_type === "movie") counts.movies++;
@@ -349,7 +365,6 @@ function buildMediaItems(cache, includeHidden = false, slim = true) {
     }
   }
 
-  // Group collections
   const colGroups = {};
   for (const it of items) {
     if (it.media_type !== "movie") continue;
@@ -396,6 +411,47 @@ function buildMediaItems(cache, includeHidden = false, slim = true) {
   }
 
   return { items, counts, collections: collections.filter((c) => c.is_active) };
+}
+
+function computeUsersMetrics(env, usersMap) {
+  const hiddenSet = new Set(getHiddenAdminIds(env));
+  const nowSec = Math.floor(Date.now() / 1000);
+  const allUsers = [];
+  let vipCount = 0;
+  for (const [uidStr, u] of Object.entries(usersMap || {})) {
+    if (!u || typeof u !== "object") continue;
+    const uid = parseInt(uidStr, 10);
+    if (!uid || hiddenSet.has(uid)) continue;
+    const isVip = Number(u.vip_until || 0) > nowSec;
+    if (isVip) vipCount++;
+    allUsers.push({
+      user_id: uid,
+      name: String(u.first_name || "مستخدم"),
+      first_name: String(u.first_name || "مستخدم"),
+      username: String(u.username || ""),
+      points: Number(u.points || 0),
+      referrals: Number(u.referrals_count || 0),
+      referrals_count: Number(u.referrals_count || 0),
+      is_vip: isVip,
+      joined_at: String(u.joined_at || ""),
+      channel_url: (u.custom_channel && u.custom_channel.url) || "",
+    });
+  }
+  const leaderboard = allUsers
+    .filter((x) => x.referrals > 0)
+    .sort((a, b) => b.referrals - a.referrals || b.points - a.points)
+    .slice(0, 10)
+    .map((u, idx) => ({ ...u, rank: idx + 1 }));
+
+  const newUsers = allUsers.slice(-25).reverse();
+  const topUsers = [...allUsers].sort((a, b) => b.points - a.points || b.referrals - a.referrals).slice(0, 20);
+  return {
+    totalUsers: allUsers.length,
+    vipCount,
+    leaderboard,
+    newUsers,
+    topUsers,
+  };
 }
 
 function buildSmartSections(cache, items) {
@@ -450,7 +506,7 @@ function getBrandConfig(settings) {
 }
 
 // ============================================================================
-// 5. TMDb Helper (For Admin Bot Quick Video Ingestion)
+// 5. TMDb Helper
 // ============================================================================
 async function searchTmdbSingle(env, settings, query, mediaType = "movie") {
   const apiKey = getSetting(settings, "tmdb_api_key", "") || String(env.FALLBACK_TMDB_KEYS || DEFAULT_TMDB_KEY).split(",")[0].trim();
@@ -491,13 +547,14 @@ async function searchTmdbSingle(env, settings, query, mediaType = "movie") {
 }
 
 // ============================================================================
-// 6. Telegram Bot Webhook Handlers (Main + Sender + Admin)
+// 6. Main Bot Webhook (@Vortexee_Bot)
 // ============================================================================
 async function handleMainBotWebhook(env, update, originUrl) {
   const cache = await loadCoreData(env);
   const settings = cache.settings;
   const brand = getBrandConfig(settings);
   const webappUrl = getSetting(settings, "webapp_url", originUrl) || originUrl;
+  const senderUser = EDGE_CACHE.botInfo.sender_username || "Vortexeeserver_Bot";
 
   if (update.pre_checkout_query) {
     await tgCall(env.MAIN_BOT_TOKEN, "answerPreCheckoutQuery", {
@@ -514,6 +571,7 @@ async function handleMainBotWebhook(env, update, originUrl) {
     const uid = msg.from.id;
     const untilTs = Math.floor(Date.now() / 1000) + 30 * 86400;
     await fbPatch(env, `users/${uid}`, { vip_until: untilTs });
+    invalidateEdgeCache();
     await tgCall(env.MAIN_BOT_TOKEN, "sendMessage", {
       chat_id: msg.chat.id,
       text: "✦ <b>ألف مبروك! تفعل عندك اشتراك فورتكس PRO لمدة 30 يوم!</b>",
@@ -527,7 +585,6 @@ async function handleMainBotWebhook(env, update, originUrl) {
     const text = msg.text.trim();
     const isAdm = isUserAdmin(env, uid, cache.admins);
 
-    // Register user lightly in Firebase
     await fbPatch(env, `users/${uid}`, {
       first_name: msg.from.first_name || "مستخدم",
       username: msg.from.username || "",
@@ -558,14 +615,15 @@ async function handleMainBotWebhook(env, update, originUrl) {
           const files = Object.entries(cache.media_files || {})
             .filter(([, f]) => f && Number(f.media_id) === mid)
             .map(([fid, f]) => ({ id: Number(fid), ...f }))
-            .slice(0, 8);
+            .sort((a, b) => (Number(a.season || 1) - Number(b.season || 1)) || (Number(a.episode || 0) - Number(b.episode || 0)))
+            .slice(0, 10);
           const kbRows = [];
           for (let i = 0; i < files.length; i += 2) {
             const row = [];
             for (const f of files.slice(i, i + 2)) {
               const q = normalizeQuality(f.quality);
               const lbl = f.episode ? `ح${f.episode} · ${q}p` : `▸ ${q}p`;
-              row.push(ikb(lbl, { url: `https://t.me/${EDGE_CACHE.botInfo.sender_username}?start=file_${f.id}`, style: "primary" }));
+              row.push(ikb(lbl, { url: `https://t.me/${senderUser}?start=file_${f.id}`, style: "primary" }));
             }
             kbRows.push(row);
           }
@@ -637,6 +695,9 @@ async function handleMainBotWebhook(env, update, originUrl) {
   }
 }
 
+// ============================================================================
+// 7. Sender Bot Webhook (@Vortexeeserver_Bot)
+// ============================================================================
 async function deliverFileViaSender(env, cache, chatId, uid, fileId, originUrl) {
   const f = (cache.media_files || {})[String(fileId)];
   const webappUrl = getSetting(cache.settings, "webapp_url", originUrl) || originUrl;
@@ -655,38 +716,79 @@ async function deliverFileViaSender(env, cache, chatId, uid, fileId, originUrl) 
     inline_keyboard: [[ikb("◈ فتح صفحة العمل في فورتكس ▸", { web_app: { url: `${webappUrl}?media_id=${f.media_id}&uid=${uid}` }, style: "danger" })]],
   };
 
-  let sent = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
-    chat_id: chatId,
-    from_chat_id: f.storage_chat_id,
-    message_id: Number(f.storage_message_id || 0),
-    caption,
-    parse_mode: "HTML",
-    reply_markup: replyMarkup,
-  });
+  const srcChat = normalizeChatId(f.storage_chat_id);
+  const srcMsg = Number(f.storage_message_id || 0);
+  let sent = { ok: false };
 
-  if (!sent.ok && f.storage_chat_id && f.storage_message_id) {
-    // Fallback relay via Admin Bot -> Secret Archive -> Sender Bot
-    const relayed = await tgCall(env.ADMIN_BOT_TOKEN, "copyMessage", {
-      chat_id: SECRET_ARCHIVE_CHANNEL_ID,
-      from_chat_id: f.storage_chat_id,
-      message_id: Number(f.storage_message_id),
+  if (srcChat && srcMsg > 0) {
+    sent = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
+      chat_id: chatId,
+      from_chat_id: srcChat,
+      message_id: srcMsg,
+      caption,
+      parse_mode: "HTML",
+      reply_markup: replyMarkup,
     });
-    if (relayed.ok && relayed.result && relayed.result.message_id) {
-      sent = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
-        chat_id: chatId,
-        from_chat_id: SECRET_ARCHIVE_CHANNEL_ID,
-        message_id: relayed.result.message_id,
-        caption,
-        parse_mode: "HTML",
-        reply_markup: replyMarkup,
+  }
+
+  // Fallback 1: copy via video_file_id if available
+  if (!sent.ok && f.video_file_id) {
+    sent = await tgCall(env.SENDER_BOT_TOKEN, "sendVideo", {
+      chat_id: chatId,
+      video: f.video_file_id,
+      caption,
+      parse_mode: "HTML",
+      reply_markup: replyMarkup,
+    });
+  }
+
+  // Fallback 2: Relay via Admin Bot or Main Bot -> Secret Archive -> Sender Bot
+  if (!sent.ok && srcChat && srcMsg > 0) {
+    for (const helperTok of [env.ADMIN_BOT_TOKEN, env.MAIN_BOT_TOKEN]) {
+      const relayed = await tgCall(helperTok, "copyMessage", {
+        chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
+        from_chat_id: srcChat,
+        message_id: srcMsg,
       });
+      if (relayed.ok && relayed.result && relayed.result.message_id) {
+        sent = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
+          chat_id: chatId,
+          from_chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
+          message_id: relayed.result.message_id,
+          caption,
+          parse_mode: "HTML",
+          reply_markup: replyMarkup,
+        });
+        if (sent.ok) break;
+      }
+    }
+  }
+
+  // Fallback 3: Send directly via Main Bot to user chat
+  if (!sent.ok && srcChat && srcMsg > 0) {
+    const directMain = await tgCall(env.MAIN_BOT_TOKEN, "copyMessage", {
+      chat_id: uid,
+      from_chat_id: srcChat,
+      message_id: srcMsg,
+      caption,
+      parse_mode: "HTML",
+      reply_markup: replyMarkup,
+    });
+    if (directMain.ok) {
+      await tgCall(env.SENDER_BOT_TOKEN, "sendMessage", {
+        chat_id: chatId,
+        text: "✓ <b>تم إرسال الفيديو لك مباشرة في محادثة البوت الرئيسي!</b>",
+        parse_mode: "HTML",
+      });
+      return;
     }
   }
 
   if (!sent.ok) {
     await tgCall(env.SENDER_BOT_TOKEN, "sendMessage", {
       chat_id: chatId,
-      text: "◈ تعذر إرسال الملف حالياً. تأكد من رفع بوت الإرسال مشرفاً في قناة الخزن.",
+      text: `◈ تعذر إرسال الملف حالياً (${escapeHtml(sent.description || "تأكد من رفع بوت الإرسال مشرفاً في قناة الخزن")}).`,
+      parse_mode: "HTML",
     });
   }
 }
@@ -720,7 +822,7 @@ async function handleSenderBotWebhook(env, update, originUrl) {
     } else {
       await tgCall(env.SENDER_BOT_TOKEN, "sendMessage", {
         chat_id: msg.chat.id,
-        text: "◈ أهلاً بك في بوت إرسال فورتكس! اختر الفيلم أو المسلسل من البوت الرئيسي @Vortex1_app لاستلامه هنا فوراً.",
+        text: `◈ أهلاً بك في بوت إرسال فورتكس! اختر الفيلم أو المسلسل من البوت الرئيسي @${EDGE_CACHE.botInfo.main_username} لاستلامه هنا فوراً.`,
       });
     }
   }
@@ -745,6 +847,42 @@ async function handleSenderBotWebhook(env, update, originUrl) {
   }
 }
 
+// ============================================================================
+// 8. Admin Bot Webhook (@Vortexeadmin_Bot) — Full Buttons & Interactive Flows
+// ============================================================================
+function buildAdminHomePayload(env, cache, uid, originUrl) {
+  const brand = getBrandConfig(cache.settings);
+  const webappUrl = getSetting(cache.settings, "webapp_url", originUrl) || originUrl;
+  const { counts } = buildMediaItems(cache, true, true);
+  const { totalUsers, vipCount } = computeUsersMetrics(env, cache.users);
+  const filesCnt = Object.keys(cache.media_files || {}).length;
+  const text = (
+    `◈ <b>لوحة إدارة ${escapeHtml(brand.app_name_ar)} (Cloudflare Edge V2.0)</b>\n` +
+    `━━━━━━━━━━━━━━\n` +
+    `👤 المستخدمين: <b>${totalUsers}</b>  |  ★ PRO: <b>${vipCount}</b>\n` +
+    `🎬 الأفلام: <b>${counts.movies}</b>  |  📺 المسلسلات: <b>${counts.series}</b>  |  ⚡ الأنمي: <b>${counts.anime}</b>\n` +
+    `📦 إجمالي الملفات: <b>${filesCnt}</b>\n` +
+    `⚡ الحالة: <b>سحابة Cloudflare 24/7 (صفر VPS)</b>\n\n` +
+    `▾ <b>اختر الإجراء المطلوب من الأزرار أدناه:</b>`
+  );
+  const inline_keyboard = [
+    [ikb("◈ فتح لوحة إدارة فورتكس بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })],
+    [
+      ikb("＋ إضافة عمل جديد", { callback_data: "adm_add_new", style: "danger" }),
+      ikb("＋ إضافة حلقات / دقات", { callback_data: "adm_add_ep", style: "danger" }),
+    ],
+    [
+      ikb("◈ الطلبات المعلقة", { callback_data: "adm_reqs", style: "primary" }),
+      ikb("✎ آخر الأعمال المضافة", { callback_data: "adm_recent", style: "primary" }),
+    ],
+    [
+      ikb("❖ حالة القنوات والإعدادات", { callback_data: "adm_settings", style: "success" }),
+      ikb("🔄 تحديث الكاش فوراً", { callback_data: "edge_refresh_cache", style: "success" }),
+    ],
+  ];
+  return { text, inline_keyboard };
+}
+
 async function handleAdminBotWebhook(env, update, originUrl) {
   const cache = await loadCoreData(env);
   const msg = update.message;
@@ -753,41 +891,165 @@ async function handleAdminBotWebhook(env, update, originUrl) {
   if (!isUserAdmin(env, uid, cache.admins)) return;
 
   const webappUrl = getSetting(cache.settings, "webapp_url", originUrl) || originUrl;
-  const brand = getBrandConfig(cache.settings);
 
-  if (msg && msg.text && msg.text.startsWith("/start")) {
-    const mediaCnt = Object.keys(cache.media || {}).length;
-    const filesCnt = Object.keys(cache.media_files || {}).length;
-    await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
-      chat_id: msg.chat.id,
-      text: `◈ <b>لوحة إدارة ${escapeHtml(brand.app_name_ar)} (Cloudflare Edge V1.0)</b>\n━━━━━━━━━━━━━━\n🎬 إجمالي الأعمال: <b>${mediaCnt}</b>\n📦 إجمالي الملفات: <b>${filesCnt}</b>\n⚡ الحالة: <b>سحابة Cloudflare 24/7 (صفر VPS)</b>\n\n✦ للتحكم الكامل بالأعمال والطلبات والأقسام افتح لوحة الإدارة بالميني آب أدناه، أو <b>أرسل/وجّه أي فيديو مع اسمه بالكابشن</b> لإضافته تلقائياً عبر TMDb ▾`,
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [ikb("◈ فتح لوحة إدارة فورتكس بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })],
-          [ikb("🔄 تحديث كاش السيرفر فوراً", { callback_data: "edge_refresh_cache", style: "primary" })],
-        ],
-      },
-    });
-    return;
+  if (msg && msg.text) {
+    const t = msg.text.trim();
+    if (t.startsWith("/start") || t.includes("اللوحة الرئيسية")) {
+      await fbPut(env, `meta/admin_fsm/${uid}`, null);
+      const { text, inline_keyboard } = buildAdminHomePayload(env, cache, uid, originUrl);
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard },
+      });
+      return;
+    }
+
+    if (t.includes("إضافة عمل جديد")) {
+      await fbPut(env, `meta/admin_fsm/${uid}`, { mode: "add_new", target_media_id: 0 });
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: "🎬 <b>إضافة عمل جديد:</b>\n\nأرسل أو وجّه ملف الفيديو هنا مع كتابة <b>اسم الفيلم أو المسلسل</b> في الوصف (Caption) — وراح يجلب البوستر والتفاصيل من TMDb ويحفظه تلقائياً!",
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    if (t.includes("إضافة حلقات")) {
+      const { items } = buildMediaItems(cache, true, true);
+      const recentSeries = items.slice(0, 8);
+      const rows = recentSeries.map((it) => [
+        ikb(`${it.type_ar}: ${String(it.title).slice(0, 28)} (#id${it.id})`, { callback_data: `adm_pick_media:${it.id}`, style: "primary" }),
+      ]);
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: "📺 <b>إضافة حلقات أو دقات إضافية:</b>\nاختر العمل المطلوب من القائمة أدناه ثم أرسل الفيديوهات:",
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: rows },
+      });
+      return;
+    }
+
+    if (t.includes("الإضافة التلقائية")) {
+      let srcList = [];
+      try { srcList = JSON.parse(getSetting(cache.settings, "source_channels_json", "[]")); } catch (_) {}
+      const listTxt = srcList.length ? srcList.map((c, i) => `${i + 1}. <b>${escapeHtml(c.title || c.id)}</b> (<code>${escapeHtml(c.id)}</code>)`).join("\n") : "لا توجد قنوات مضافة بعد.";
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: `⚡ <b>قنوات السحب والإضافة التلقائية:</b>\n\n${listTxt}\n\n✦ لإدارة القنوات أو تعديلها افتح لوحة الإدارة بالميني آب:`,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[ikb("◈ فتح إدارة القنوات بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })]],
+        },
+      });
+      return;
+    }
+
+    if (t.includes("تعديل أو حذف")) {
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: "✎ <b>تعديل أو حذف الأعمال:</b>\nافتح لوحة الإدارة بالميني آب للبحث السريع وتعديل أو إخفاء أو حذف أي عمل بضغطة زر:",
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[ikb("◈ فتح قسم تعديل الأعمال بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })]],
+        },
+      });
+      return;
+    }
+
+    if (t.includes("الطلبات والبلاغات")) {
+      const reqsRaw = asObj(await fbGet(env, "media_requests"));
+      const pending = Object.entries(reqsRaw).filter(([, r]) => r && r.status === "pending").slice(-8).reverse();
+      if (!pending.length) {
+        await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: msg.chat.id, text: "✅ لا توجد طلبات معلقة حالياً!" });
+        return;
+      }
+      const txt = pending.map(([rid, r]) => `• <b>#${rid}</b>: ${escapeHtml(r.request_text)} (${escapeHtml(r.prod_year || "")}) — ${escapeHtml(r.user_name)}`).join("\n");
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: `◈ <b>آخر الطلبات المعلقة (${pending.length}):</b>\n\n${txt}`,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[ikb("◈ إدارة كل الطلبات بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })]],
+        },
+      });
+      return;
+    }
+
+    if (t.includes("الغلاف") || t.includes("الإعدادات والقنوات")) {
+      const forceCh = getSetting(cache.settings, "force_sub_channel_id", "معطّل");
+      const mCh = getSetting(cache.settings, "movies_channel_id", "غير مربوطة");
+      const sCh = getSetting(cache.settings, "series_channel_id", "غير مربوطة");
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: msg.chat.id,
+        text: `❖ <b>الإعدادات والقنوات الحالية:</b>\n━━━━━━━━━━━━━━\n◈ الاشتراك الإجباري: <code>${escapeHtml(forceCh)}</code>\n🎬 خزن الأفلام: <code>${escapeHtml(mCh)}</code>\n📺 خزن المسلسلات: <code>${escapeHtml(sCh)}</code>\n🌐 رابط الميني آب: <code>${escapeHtml(webappUrl)}</code>`,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[ikb("◈ تعديل الإعدادات والقنوات بالميني آب", { web_app: { url: `${webappUrl}?open_admin=1&uid=${uid}` }, style: "danger" })]],
+        },
+      });
+      return;
+    }
   }
 
-  // Direct video/document forwarding ingestion in Admin Bot
+  // Video / Document forwarding ingestion
   if (msg && (msg.video || msg.document)) {
+    const fsm = await fbGet(env, `meta/admin_fsm/${uid}`);
+    const targetMid = fsm && Number(fsm.target_media_id || 0);
     const cap = String(msg.caption || (msg.video && msg.video.file_name) || (msg.document && msg.document.file_name) || "").trim();
-    if (!cap) {
+
+    if (!cap && !targetMid) {
       await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
         chat_id: msg.chat.id,
         text: "◈ أرسل الفيديو مع كتابة اسم الفيلم أو المسلسل في الوصف (Caption) لإضافته تلقائياً.",
       });
       return;
     }
-    const isSeries = /(?:الموسم|الحلقة|حلقة|\bS\d+E\d+\b|\bEP?\s*\d+\b)/i.test(cap);
-    const cleanTitle = cap.replace(/(?:1080p?|720p?|480p?|4k|2160p?|الموسم\s*\d+|الحلقة\s*\d+|S\d+E\d+|مترجم|كامل)/gi, "").trim();
-    const tmdb = await searchTmdbSingle(env, cache.settings, cleanTitle || cap, isSeries ? "tv" : "movie");
-    const storageCh = getSetting(cache.settings, isSeries ? "series_channel_id" : "movies_channel_id", "") || SECRET_ARCHIVE_CHANNEL_ID;
+
+    const qMatch = cap.match(/(2160|1080|720|480|360)/);
+    const quality = qMatch ? qMatch[1] : "720";
+    const sMatch = cap.match(/(?:الموسم|S)\s*(\d+)/i);
+    const eMatch = cap.match(/(?:الحلقة|حلقة|E|EP)\s*(\d+)/i);
+    const seasonNum = sMatch ? parseInt(sMatch[1], 10) : 1;
+    const epNum = eMatch ? parseInt(eMatch[1], 10) : 0;
+    const fObj = msg.video || msg.document;
+
+    let finalMid = targetMid;
+    let mediaTitle = "";
+
+    if (!finalMid) {
+      const isSeries = epNum > 0 || /(?:الموسم|الحلقة|حلقة|\bS\d+E\d+\b)/i.test(cap);
+      const cleanTitle = cap.replace(/(?:1080p?|720p?|480p?|4k|2160p?|الموسم\s*\d+|الحلقة\s*\d+|S\d+E\d+|مترجم|كامل)/gi, "").trim();
+      const tmdb = await searchTmdbSingle(env, cache.settings, cleanTitle || cap, isSeries ? "tv" : "movie");
+      const existingIds = Object.keys(cache.media || {}).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
+      finalMid = (existingIds.length ? Math.max(...existingIds) : 0) + 1;
+      mediaTitle = tmdb ? tmdb.title : cleanTitle || cap;
+      const mediaPayload = {
+        tmdb_id: tmdb ? tmdb.tmdb_id : 0,
+        media_type: isSeries ? "tv" : "movie",
+        title: mediaTitle,
+        original_title: tmdb ? tmdb.original_title : cleanTitle || cap,
+        year: tmdb ? tmdb.year : "",
+        rating: tmdb ? tmdb.rating : 0,
+        genres: tmdb ? tmdb.genres : [],
+        overview: tmdb ? tmdb.overview : "متوفر للمشاهدة والتحميل على منصة فورتكس.",
+        poster_url: tmdb ? tmdb.poster_url : "",
+        backdrop_url: tmdb ? tmdb.backdrop_url : "",
+        cast_json: tmdb ? tmdb.cast_json : "[]",
+        trailer_url: tmdb ? tmdb.trailer_url : "",
+        views_count: 1,
+        is_hidden: 0,
+        created_at: nowIso(),
+      };
+      await fbPut(env, `media/${finalMid}`, mediaPayload);
+    } else {
+      mediaTitle = (cache.media[String(finalMid)] && cache.media[String(finalMid)].title) || `#id${finalMid}`;
+    }
+
+    const storageCh = getSetting(cache.settings, "movies_channel_id", "") || SECRET_ARCHIVE_CHANNEL_ID;
     const copied = await tgCall(env.ADMIN_BOT_TOKEN, "copyMessage", {
-      chat_id: storageCh,
+      chat_id: normalizeChatId(storageCh),
       from_chat_id: msg.chat.id,
       message_id: msg.message_id,
     });
@@ -798,77 +1060,80 @@ async function handleAdminBotWebhook(env, update, originUrl) {
       });
       return;
     }
-    // Also mirror silently to secret archive
     if (String(storageCh) !== SECRET_ARCHIVE_CHANNEL_ID) {
       await tgCall(env.ADMIN_BOT_TOKEN, "copyMessage", {
-        chat_id: SECRET_ARCHIVE_CHANNEL_ID,
+        chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
         from_chat_id: msg.chat.id,
         message_id: msg.message_id,
       });
     }
 
-    const existingIds = Object.keys(cache.media || {}).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
-    const newMediaId = (existingIds.length ? Math.max(...existingIds) : 0) + 1;
     const existingFids = Object.keys(cache.media_files || {}).map((x) => parseInt(x, 10)).filter((n) => !Number.isNaN(n));
     const newFileId = (existingFids.length ? Math.max(...existingFids) : 0) + 1;
-    const qMatch = cap.match(/(2160|1080|720|480|360)/);
-    const quality = qMatch ? qMatch[1] : "720";
-    const fObj = msg.video || msg.document;
-
-    const mediaPayload = {
-      tmdb_id: tmdb ? tmdb.tmdb_id : 0,
-      media_type: isSeries ? "tv" : "movie",
-      title: tmdb ? tmdb.title : cleanTitle || cap,
-      original_title: tmdb ? tmdb.original_title : cleanTitle || cap,
-      year: tmdb ? tmdb.year : "",
-      rating: tmdb ? tmdb.rating : 0,
-      genres: tmdb ? tmdb.genres : [],
-      overview: tmdb ? tmdb.overview : "متوفر للمشاهدة والتحميل على منصة فورتكس.",
-      poster_url: tmdb ? tmdb.poster_url : "",
-      backdrop_url: tmdb ? tmdb.backdrop_url : "",
-      cast_json: tmdb ? tmdb.cast_json : "[]",
-      trailer_url: tmdb ? tmdb.trailer_url : "",
-      views_count: 1,
-      is_hidden: 0,
-      created_at: nowIso(),
-    };
-    const filePayload = {
-      media_id: newMediaId,
+    await fbPut(env, `media_files/${newFileId}`, {
+      media_id: finalMid,
       quality,
-      season: 1,
-      episode: isSeries ? 1 : 0,
+      season: seasonNum,
+      episode: epNum,
       storage_chat_id: String(storageCh),
       storage_message_id: copied.result.message_id,
       video_file_id: String(fObj.file_id || ""),
       file_size_mb: Math.round(((fObj.file_size || 0) / (1024 * 1024)) * 10) / 10,
       duration_sec: Number(fObj.duration || 0),
-    };
-    await Promise.all([
-      fbPut(env, `media/${newMediaId}`, mediaPayload),
-      fbPut(env, `media_files/${newFileId}`, filePayload),
-    ]);
+    });
     invalidateEdgeCache();
     await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
       chat_id: msg.chat.id,
-      text: `✓ <b>تمت الإضافة وحفظ العمل بنجاح!</b>\n🎬 <b>${escapeHtml(mediaPayload.title)}</b> (#id${newMediaId}) · الدقة ${quality}p`,
+      text: `✓ <b>تم الحفظ بنجاح!</b>\n🎬 <b>${escapeHtml(mediaTitle)}</b> (#id${finalMid}) · ${epNum ? `م${seasonNum} ح${epNum} · ` : ""}${quality}p`,
       parse_mode: "HTML",
     });
     return;
   }
 
-  if (cb && cb.data === "edge_refresh_cache") {
-    invalidateEdgeCache();
-    await loadCoreData(env, true);
-    await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", {
-      callback_query_id: cb.id,
-      text: "تم تحديث الكاش من Firebase بنجاح ✓",
-      show_alert: true,
-    });
+  if (cb && cb.data) {
+    const d = cb.data;
+    if (d === "edge_refresh_cache") {
+      invalidateEdgeCache();
+      await loadCoreData(env, true);
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: "تم تحديث الكاش من Firebase ✓", show_alert: true });
+    } else if (d === "adm_add_new") {
+      await fbPut(env, `meta/admin_fsm/${uid}`, { mode: "add_new", target_media_id: 0 });
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id });
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: cb.message.chat.id, text: "🎬 أرسل الفيديو الآن مع كتابة اسم العمل في الوصف (Caption)." });
+    } else if (d === "adm_add_ep") {
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id });
+      const { items } = buildMediaItems(cache, true, true);
+      const rows = items.slice(0, 8).map((it) => [ikb(`${it.type_ar}: ${String(it.title).slice(0, 28)} (#id${it.id})`, { callback_data: `adm_pick_media:${it.id}`, style: "primary" })]);
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: cb.message.chat.id, text: "📺 اختر العمل لإضافة حلقات أو دقات له:", reply_markup: { inline_keyboard: rows } });
+    } else if (d.startsWith("adm_pick_media:")) {
+      const mid = parseInt(d.split(":")[1] || "0", 10);
+      await fbPut(env, `meta/admin_fsm/${uid}`, { mode: "append", target_media_id: mid });
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id, text: `تم اختيار #id${mid} ✓` });
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: cb.message.chat.id, text: `✓ أرسل الآن الفيديوهات ليتم إضافتها مباشرة للعمل <b>#id${mid}</b> (اكتب رقم الحلقة والدقة بالكابشن إن وجدت).`, parse_mode: "HTML" });
+    } else if (d === "adm_recent") {
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id });
+      const { items } = buildMediaItems(cache, true, true);
+      const list = items.slice(0, 12).map((it) => `• <b>#id${it.id}</b> ${escapeHtml(it.title)} (${it.year || ""}) — ${it.files.length} ملف`).join("\n");
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: cb.message.chat.id, text: `▣ <b>آخر 12 عمل مضاف:</b>\n\n${list}`, parse_mode: "HTML" });
+    } else if (d === "adm_reqs") {
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id });
+      const reqsRaw = asObj(await fbGet(env, "media_requests"));
+      const pending = Object.entries(reqsRaw).filter(([, r]) => r && r.status === "pending").slice(-10).reverse();
+      const txt = pending.length ? pending.map(([rid, r]) => `• <b>#${rid}</b>: ${escapeHtml(r.request_text)} (${escapeHtml(r.prod_year || "")})`).join("\n") : "✅ لا توجد طلبات معلقة.";
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", { chat_id: cb.message.chat.id, text: `◈ <b>الطلبات المعلقة:</b>\n\n${txt}`, parse_mode: "HTML" });
+    } else if (d === "adm_settings") {
+      await tgCall(env.ADMIN_BOT_TOKEN, "answerCallbackQuery", { callback_query_id: cb.id });
+      await tgCall(env.ADMIN_BOT_TOKEN, "sendMessage", {
+        chat_id: cb.message.chat.id,
+        text: `❖ <b>حالة النظام:</b>\n• الاشتراك الإجباري: <code>${escapeHtml(getSetting(cache.settings, "force_sub_channel_id", "معطّل"))}</code>\n• رابط الميني آب: <code>${escapeHtml(webappUrl)}</code>`,
+        parse_mode: "HTML",
+      });
+    }
   }
 }
 
 // ============================================================================
-// 7. JSON Response & CORS Helper
+// 9. JSON Response & Worker Entrypoint
 // ============================================================================
 function jsonResp(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -883,9 +1148,6 @@ function jsonResp(data, status = 200) {
   });
 }
 
-// ============================================================================
-// 8. Main Cloudflare Worker Fetch Entrypoint
-// ============================================================================
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -903,12 +1165,10 @@ export default {
     const path = url.pathname;
     const origin = url.origin;
 
-    // 1. Health check
     if (path === "/health" || path === "/ping") {
       return jsonResp({ status: "ok", app: "VORTEX-EDGE", version: APP_VERSION, origin });
     }
 
-    // 2. One-click Webhook & Menu Button setup for all 3 bots
     if (path === "/setup-webhooks") {
       const key = url.searchParams.get("key") || "";
       if (!isOwnerId(env, key)) {
@@ -922,22 +1182,33 @@ export default {
         tgCall(env.ADMIN_BOT_TOKEN, "getMe"),
         tgCall(env.SENDER_BOT_TOKEN, "getMe"),
       ]);
-      await fbPut(env, "settings/webapp_url", origin);
+      const mainU = (meMain && meMain.result && meMain.result.username) || "Vortexee_Bot";
+      const admU = (meAdmin && meAdmin.result && meAdmin.result.username) || "Vortexeadmin_Bot";
+      const sndU = (meSender && meSender.result && meSender.result.username) || "Vortexeeserver_Bot";
+
+      await fbPatch(env, "settings", {
+        webapp_url: origin,
+        bot_main_username: mainU,
+        bot_admin_username: admU,
+        bot_sender_username: sndU,
+      });
       await fbPut(env, "meta/live_api_url", origin);
       await tgCall(env.MAIN_BOT_TOKEN, "setChatMenuButton", {
         menu_button: { type: "web_app", text: "VORTEX", web_app: { url: origin } },
       });
+      EDGE_CACHE.botInfo.main_username = mainU;
+      EDGE_CACHE.botInfo.admin_username = admU;
+      EDGE_CACHE.botInfo.sender_username = sndU;
       invalidateEdgeCache();
       return jsonResp({
         ok: true,
         webapp_url: origin,
-        main_bot: { username: meMain?.result?.username, webhook: rMain },
-        admin_bot: { username: meAdmin?.result?.username, webhook: rAdmin },
-        sender_bot: { username: meSender?.result?.username, webhook: rSender },
+        main_bot: { username: mainU, webhook: rMain },
+        admin_bot: { username: admU, webhook: rAdmin },
+        sender_bot: { username: sndU, webhook: rSender },
       });
     }
 
-    // 3. Telegram Webhooks
     if (request.method === "POST" && path.startsWith("/webhook/")) {
       const update = await request.json().catch(() => ({}));
       try {
@@ -950,7 +1221,6 @@ export default {
       return jsonResp({ ok: true });
     }
 
-    // 4. Mini App APIs
     if (path === "/api/bootstrap") {
       const cache = await loadCoreData(env);
       const uid = parseInt(url.searchParams.get("user_id") || "0", 10) || 0;
@@ -958,15 +1228,24 @@ export default {
       const initialLimit = parseInt(url.searchParams.get("initial_limit") || "36", 10) || 36;
       const isAdm = isUserAdmin(env, uid, cache.admins);
 
-      const [sub, userRec, userListsRaw, userReqsRaw] = await Promise.all([
+      const [sub, userListsRaw, userReqsRaw] = await Promise.all([
         checkUserSubscription(env, cache.settings, uid, cache.admins, true),
-        uid > 0 ? fbGet(env, `users/${uid}`) : Promise.resolve(null),
         uid > 0 ? fbGet(env, `user_lists/${uid}`) : Promise.resolve(null),
         uid > 0 ? fbGet(env, "media_requests") : Promise.resolve(null),
       ]);
 
+      const userRec = uid > 0 ? (cache.users || {})[String(uid)] || null : null;
+      if (uid > 0 && !userRec) {
+        await fbPatch(env, `users/${uid}`, {
+          first_name: url.searchParams.get("first_name") || "مستخدم",
+          username: url.searchParams.get("username") || "",
+          joined_at: nowIso(),
+        });
+      }
+
       const { items: allItems, counts, collections } = buildMediaItems(cache, isAdm, true);
       const smartSections = buildSmartSections(cache, allItems);
+      const { leaderboard } = computeUsersMetrics(env, cache.users);
       const nowSec = Math.floor(Date.now() / 1000);
       const vipUntil = Number((userRec && userRec.vip_until) || 0);
       const isVip = vipUntil > nowSec || isAdm;
@@ -1026,7 +1305,7 @@ export default {
           referral_points: parseInt(getSetting(cache.settings, "referral_points", "20"), 10),
         },
         profile,
-        leaderboard: [],
+        leaderboard,
         request_quota: { enabled: true, cycle: "weekly", cycle_ar: "هذا الأسبوع", renew_ar: "كل 7 أيام", cycle_max: 5, cycle_left: 5 },
         user_requests: userRequests,
         tonight: allItems.find((x) => x.is_tonight && !x.is_hidden) || allItems[0] || null,
@@ -1072,6 +1351,7 @@ export default {
     if (path === "/api/user/theme" && request.method === "POST") {
       const body = await request.json().catch(() => ({}));
       if (body.user_id) await fbPut(env, `users/${body.user_id}/theme`, String(body.theme || "vortex"));
+      invalidateEdgeCache();
       return jsonResp({ status: "ok", theme: body.theme || "vortex" });
     }
 
@@ -1157,6 +1437,7 @@ export default {
       const uid = parseInt(url.searchParams.get("user_id") || "0", 10) || 0;
       if (!isUserAdmin(env, uid, cache.admins)) return jsonResp({ detail: "Forbidden" }, 403);
       const { items, counts, collections } = buildMediaItems(cache, true, true);
+      const { totalUsers, vipCount, newUsers, topUsers } = computeUsersMetrics(env, cache.users);
       const [reqsRaw, repsRaw] = await Promise.all([fbGet(env, "media_requests"), fbGet(env, "media_reports")]);
       const pendingRequests = Object.entries(asObj(reqsRaw))
         .filter(([, r]) => r && r.status === "pending")
@@ -1168,16 +1449,28 @@ export default {
         .map(([id, r]) => ({ id: Number(id), ...r }))
         .slice(-30)
         .reverse();
+
       return jsonResp({
         stats: {
+          users: totalUsers,
+          new_users_today: 0,
+          vips: vipCount,
           movies: counts.movies,
           series: counts.series,
           anime: counts.anime,
           files: Object.keys(cache.media_files || {}).length,
+          downloads: 0,
+          pulls_today: 0,
           requests_pending: pendingRequests.length,
           reports_pending: pendingReports.length,
           admins: getAdminIds(env).length,
         },
+        users_dashboard: {
+          new_users: newUsers,
+          top_users: topUsers,
+          total_users: totalUsers,
+        },
+        admins_list: getAdminIds(env).map((aid) => ({ user_id: aid, role_title: "المالك الأساسي", is_owner: true })),
         pending_requests: pendingRequests,
         pending_reports: pendingReports,
         all_media_admin: items,
@@ -1230,11 +1523,10 @@ export default {
       return jsonResp({ status: "ok", message: "تم التنفيذ بنجاح ✓" });
     }
 
-    // 5. Serve Static Mini App Assets (public/index.html)
     if (env.ASSETS) {
       return env.ASSETS.fetch(request);
     }
-    return new Response("VORTEX Edge Worker is running! Connect [assets] directory = ./public.", {
+    return new Response("VORTEX Edge Worker is running!", {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   },
