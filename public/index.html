@@ -2705,7 +2705,7 @@
     resolveCurrentTelegramUser();
 
     let appState = {
-      bot_info: { main_username: "Vortex1_app", sender_username: "Vortexeserver_Bot", admin_username: "VortexeAdmin_Bot" },
+      bot_info: { main_username: "Vortexee_Bot", sender_username: "Vortexeeserver_Bot", admin_username: "Vortexeadmin_Bot" },
       subscription: { is_subscribed: true, channel_link: "", channel_title: "" },
       ads_config: { provider: "vortex_ads", enabled: true, raw_enabled: true, timer_seconds: 15, fallback_timer: true, tasks: [] },
       vip_config: { stars_price: 50, points_price: 100, referral_points: 20 },
@@ -4035,7 +4035,7 @@
           })
         });
       } catch (e) {}
-      const mainBot = appState.bot_info.main_username || 'Vortex1_app';
+      const mainBot = appState.bot_info.main_username || 'Vortexee_Bot';
       const url = `https://t.me/${mainBot}?start=watch_${appState.selectedMedia.id}`;
       const text = `فورتكس ${appState.selectedMedia.type_ar} «${appState.selectedMedia.title}» مترجم بدقة عالية على تطبيق فورتكس `;
       const shareLink = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`;
@@ -4888,7 +4888,7 @@
         })
       }).catch(() => {});
 
-      const senderBot = (appState.bot_info && appState.bot_info.sender_username) ? appState.bot_info.sender_username : 'Vortexeserver_Bot';
+      const senderBot = (appState.bot_info && appState.bot_info.sender_username) ? appState.bot_info.sender_username : 'Vortexeeserver_Bot';
       const deepLink = `https://t.me/${senderBot}?start=file_${fileId}`;
       if (tg && tg.openTelegramLink) {
         tg.openTelegramLink(deepLink);
@@ -4999,7 +4999,7 @@
     }
 
     function copyReferralLink() {
-      const mainBot = appState.bot_info.main_username || 'Vortex1_app';
+      const mainBot = appState.bot_info.main_username || 'Vortexee_Bot';
       const refUrl = `https://t.me/${mainBot}?start=ref_${currentUser.id}`;
       if (navigator.clipboard) {
         navigator.clipboard.writeText(refUrl);
@@ -5010,7 +5010,7 @@
     }
 
     function shareReferralLinkDirect() {
-      const mainBot = appState.bot_info.main_username || 'Vortex1_app';
+      const mainBot = appState.bot_info.main_username || 'Vortexee_Bot';
       const refUrl = `https://t.me/${mainBot}?start=ref_${currentUser.id}`;
       const text = 'تعال لتطبيق فورتكس أقوى مكتبة أفلام ومسلسلات مترجمة داخل تيليجرام بدون تعقيد!';
       const shareLink = `https://t.me/share/url?url=${encodeURIComponent(refUrl)}&text=${encodeURIComponent(text)}`;
@@ -5219,7 +5219,7 @@
 
     function switchAdminTab(tab) {
       appState.activeAdminTab = tab;
-      ['users', 'admins', 'branding', 'requests', 'reports', 'media', 'sections', 'collections', 'settings'].forEach(k => {
+      ['users', 'admins', 'branding', 'requests', 'reports', 'media', 'incomplete', 'sections', 'collections', 'settings'].forEach(k => {
         const el = document.getElementById(`adm-tab-${k}`);
         if (el) el.classList.toggle('active', k === tab);
       });
@@ -5235,6 +5235,8 @@
         appState.admin_overview = await res.json();
         document.getElementById('adm-req-cnt').textContent = (appState.admin_overview.pending_requests || []).length;
         document.getElementById('adm-rep-cnt').textContent = (appState.admin_overview.pending_reports || []).length;
+        const incCntEl = document.getElementById('adm-inc-cnt');
+        if (incCntEl) incCntEl.textContent = (appState.admin_overview.incomplete_series || []).length;
         const colCntEl = document.getElementById('adm-col-cnt');
         if (colCntEl) colCntEl.textContent = (appState.admin_overview.collections || []).length;
         const secCntEl = document.getElementById('adm-sec-cnt');
@@ -5243,7 +5245,7 @@
         if (usrCntEl) usrCntEl.textContent = (appState.admin_overview.stats && appState.admin_overview.stats.users) || 0;
         const admCntEl = document.getElementById('adm-adm-cnt');
         if (admCntEl) admCntEl.textContent = (appState.admin_overview.admins_list || []).length;
-        ['users', 'admins', 'branding', 'requests', 'reports', 'media', 'sections', 'collections', 'settings'].forEach(k => {
+        ['users', 'admins', 'branding', 'requests', 'reports', 'media', 'incomplete', 'sections', 'collections', 'settings'].forEach(k => {
           const el = document.getElementById(`adm-tab-${k}`);
           if (el) el.classList.toggle('active', k === appState.activeAdminTab);
         });
@@ -6643,7 +6645,7 @@ function adminPromptUserAction(action) {
         app_name_en: (document.getElementById('br-name-en')?.value || 'VORTEX').trim(),
         app_tagline: (document.getElementById('br-tagline')?.value || '').trim(),
         app_logo_url: (document.getElementById('br-logo-url')?.value || '').trim(),
-        app_primary_color: (document.getElementById('br-primary-color')?.value || '#3b82f6').trim(),
+        app_primary_color: (document.getElementById('br-primary-color')?.value || '#e11d48').trim(),
         
       };
       await adminUpdateSetting(updates);
@@ -6701,6 +6703,7 @@ function adminPromptUserAction(action) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            admin_id: currentUser.id,
             user_id: currentUser.id,
             action: action,
             channel_input: channelInput || ''
@@ -6710,7 +6713,7 @@ function adminPromptUserAction(action) {
         showToast(data.message || (data.ok ? 'تم بنجاح ✓' : 'حدث خطأ'));
         if (data.ok) {
           await loadAdminOverview();
-          renderAdminTabContent('branding');
+          renderAdminPanelBody();
         }
       } catch (e) {
         showToast('تعذر الاتصال بالسيرفر');
