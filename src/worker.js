@@ -1,11 +1,3 @@
-
- * ============================================================================
- * VORTEX EDGE V1.0 — 100% Zero-VPS Cloudflare Worker (3 Bots + Mini App + API)
- * Connected natively to Firebase Realtime Database (vortex-b521e)
- * - No Python, No VPS, No GitHub Actions, No RAM/CPU limits, 24/7 Permanent HTTPS
- * ============================================================================
- */
-
 const SECRET_ARCHIVE_CHANNEL_ID = "-1004386494829";
 const DEFAULT_TMDB_KEY = "3fd2be6f0c70a2a598f084ddfb75487c";
 const APP_VERSION = "1.0.0-Edge";
