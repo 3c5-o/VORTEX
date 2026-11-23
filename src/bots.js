@@ -588,14 +588,19 @@ export async function deliverFileViaSender(env, cache, chatId, uid, fileId, orig
     ],
   };
 
+  const srcChat = normalizeChatId(fRec.storage_chat_id || fRec.storage_channel_id || "");
+  const srcMsg = Number(fRec.storage_message_id || fRec.storage_msg_id || 0);
+  const secMsg = Number(fRec.secret_message_id || fRec.secret_msg_id || 0);
+  const rawFileId = String(fRec.video_file_id || fRec.file_id || "");
+
   let sentRes = null;
 
-  // 1) Try copyMessage from storage channel (fastest, works across bots if sender is in storage channel)
-  if (fRec.storage_channel_id && Number(fRec.storage_msg_id || 0) > 0) {
+  // 1) Direct copyMessage from storage channel via Sender Bot
+  if (srcChat && srcMsg > 0) {
     sentRes = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
       chat_id: chatId,
-      from_chat_id: normalizeChatId(fRec.storage_channel_id),
-      message_id: Number(fRec.storage_msg_id),
+      from_chat_id: srcChat,
+      message_id: srcMsg,
       caption,
       parse_mode: "HTML",
       reply_markup,
@@ -603,22 +608,22 @@ export async function deliverFileViaSender(env, cache, chatId, uid, fileId, orig
   }
 
   // 2) Fallback: copyMessage from silent secret archive channel
-  if ((!sentRes || !sentRes.ok) && Number(fRec.secret_msg_id || 0) > 0) {
+  if ((!sentRes || !sentRes.ok) && secMsg > 0) {
     sentRes = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
       chat_id: chatId,
-      from_chat_id: SECRET_ARCHIVE_CHANNEL_ID,
-      message_id: Number(fRec.secret_msg_id),
+      from_chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
+      message_id: secMsg,
       caption,
       parse_mode: "HTML",
       reply_markup,
     });
   }
 
-  // 3) Fallback: direct sendVideo / sendDocument with file_id + unified cover
-  if ((!sentRes || !sentRes.ok) && fRec.file_id) {
+  // 3) Fallback: direct sendVideo / sendDocument with video_file_id + unified cover
+  if ((!sentRes || !sentRes.ok) && rawFileId) {
     const payload = {
       chat_id: chatId,
-      video: fRec.file_id,
+      video: rawFileId,
       caption,
       parse_mode: "HTML",
       supports_streaming: true,
@@ -631,7 +636,7 @@ export async function deliverFileViaSender(env, cache, chatId, uid, fileId, orig
     if (!sentRes || !sentRes.ok) {
       sentRes = await tgCall(env.SENDER_BOT_TOKEN, "sendDocument", {
         chat_id: chatId,
-        document: fRec.file_id,
+        document: rawFileId,
         caption,
         parse_mode: "HTML",
         reply_markup,
@@ -639,10 +644,55 @@ export async function deliverFileViaSender(env, cache, chatId, uid, fileId, orig
     }
   }
 
+  // 4) Fallback: Multi-Bot Relay (Admin Bot / Main Bot -> Secret Archive -> Sender Bot)
+  if ((!sentRes || !sentRes.ok) && srcChat && srcMsg > 0) {
+    for (const helperTok of [env.ADMIN_BOT_TOKEN, env.MAIN_BOT_TOKEN]) {
+      const relayed = await tgCall(helperTok, "copyMessage", {
+        chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
+        from_chat_id: srcChat,
+        message_id: srcMsg,
+      });
+      if (relayed && relayed.ok && relayed.result && relayed.result.message_id) {
+        const newSecId = relayed.result.message_id;
+        await fbPatch(env, `media_files/${fileId}`, { secret_message_id: newSecId, secret_msg_id: newSecId });
+        sentRes = await tgCall(env.SENDER_BOT_TOKEN, "copyMessage", {
+          chat_id: chatId,
+          from_chat_id: Number(SECRET_ARCHIVE_CHANNEL_ID),
+          message_id: newSecId,
+          caption,
+          parse_mode: "HTML",
+          reply_markup,
+        });
+        if (sentRes && sentRes.ok) break;
+      }
+    }
+  }
+
+  // 5) Fallback: Direct send via Main Bot to user chat
+  if ((!sentRes || !sentRes.ok) && srcChat && srcMsg > 0) {
+    const directMain = await tgCall(env.MAIN_BOT_TOKEN, "copyMessage", {
+      chat_id: uid,
+      from_chat_id: srcChat,
+      message_id: srcMsg,
+      caption,
+      parse_mode: "HTML",
+      reply_markup,
+    });
+    if (directMain && directMain.ok) {
+      await tgCall(env.SENDER_BOT_TOKEN, "sendMessage", {
+        chat_id: chatId,
+        text: "✅ <b>تم إرسال الفيديو لك مباشرة في محادثة البوت الرئيسي!</b>",
+        parse_mode: "HTML",
+      });
+      sentRes = directMain;
+    }
+  }
+
   if (!sentRes || !sentRes.ok) {
     await tgCall(env.SENDER_BOT_TOKEN, "sendMessage", {
       chat_id: chatId,
-      text: "⚠️ تعذر إرسال الملف حالياً. تأكد من رفع بوت الإرسال مشرفاً في قنوات الخزن أو تواصل مع الإدارة.",
+      text: `⚠️ تعذر إرسال الملف حالياً (${escapeHtml((sentRes && sentRes.description) || "تأكد من رفع بوت الإرسال مشرفاً في قنوات الخزن")}).`,
+      parse_mode: "HTML",
     });
     return;
   }

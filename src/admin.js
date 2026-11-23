@@ -226,8 +226,12 @@ async function saveIngestedVideo(env, cache, { fileId, sizeMb, chatId, messageId
     episode_title: "",
     duration_mins: 0,
     file_id: fileId,
+    video_file_id: fileId,
+    storage_chat_id: storageCh || String(chatId || ""),
     storage_channel_id: storageCh || String(chatId || ""),
+    storage_message_id: storageMsgId || Number(messageId || 0),
     storage_msg_id: storageMsgId || Number(messageId || 0),
+    secret_message_id: secretMsgId,
     secret_msg_id: secretMsgId,
     created_at: nowIso(),
   };

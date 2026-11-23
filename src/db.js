@@ -390,10 +390,13 @@ export function buildMediaItems(cache, includeHidden = false, slim = false) {
       episode: Number(f.episode || 0),
       episode_title: String(f.episode_title || ""),
       duration_mins: Number(f.duration_mins || f.duration_min || 0),
-      file_id: String(f.file_id || ""),
-      storage_channel_id: String(f.storage_channel_id || ""),
-      storage_msg_id: Number(f.storage_msg_id || 0),
-      secret_msg_id: Number(f.secret_msg_id || 0),
+      file_id: String(f.video_file_id || f.file_id || ""),
+      video_file_id: String(f.video_file_id || f.file_id || ""),
+      storage_chat_id: String(f.storage_chat_id || f.storage_channel_id || ""),
+      storage_channel_id: String(f.storage_chat_id || f.storage_channel_id || ""),
+      storage_message_id: Number(f.storage_message_id || f.storage_msg_id || 0),
+      storage_msg_id: Number(f.storage_message_id || f.storage_msg_id || 0),
+      secret_msg_id: Number(f.secret_message_id || f.secret_msg_id || 0),
     });
   }
 
